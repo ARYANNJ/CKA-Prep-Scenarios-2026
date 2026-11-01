@@ -1,0 +1,1 @@
+# CKA-Prep-Scenarios-2026
