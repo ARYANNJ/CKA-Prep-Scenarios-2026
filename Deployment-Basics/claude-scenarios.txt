@@ -1,0 +1,66 @@
+Q1: Quota blocks the Deployment
+
+Setup:
+
+bash
+kubectl create ns team-a
+cat <<'EOF' | kubectl apply -n team-a -f -
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: team-quota
+spec:
+  hard:
+    pods: "10"
+    requests.cpu: "1"
+    requests.memory: 1Gi
+    limits.cpu: "2"
+    limits.memory: 1Gi
+---
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: team-limits
+spec:
+  limits:
+  - type: Container
+    defaultRequest: {cpu: 250m, memory: 128Mi}
+    default: {cpu: 500m, memory: 256Mi}
+EOF
+kubectl create deployment batch -n team-a --image=nginx:1.25 --replicas=5
+
+Task: The Deployment batch should have 5 running pods, but it doesn’t. Find out why, and get all 5 running without editing the ResourceQuota or the LimitRange. You may only change the Deployment. Explain where the error message shows up (hint: it’s not in kubectl get pods).
+
+Tips:
+Q1 is solved: 5/5 pods are Running and the quota and LimitRange are untouched. Your method needs some tightening for the exam.
+
+What was actually happening
+
+The LimitRange injects defaults into every container that has none: requests of 250m CPU and 128Mi memory, limits of 500m CPU and 256Mi memory. For 5 pods that gives:
+
+Quota item	5 pods x default	Hard limit	Result
+requests.cpu	1250m	1	exceeded, only 4 fit
+limits.cpu	2500m	2	exceeded
+limits.memory	1280Mi	1Gi	exceeded
+requests.memory	640Mi	1Gi	fine
+
+So there were two or three separate blockers, which is why fixing CPU alone still left you at 4 pods.
+
+Corrections to your reasoning
+
+lscpu is irrelevant. The quota caps the namespace, not the node. Do the arithmetic against the quota (k describe quota -n team-a shows Used vs Hard) rather than checking node hardware.
+Where the error shows up. A quota rejection happens when the ReplicaSet tries to create a pod, so the FailedCreate event is on the ReplicaSet, not the Deployment or the pods. Use k describe rs -n team-a, or your get events --sort-by command, which also works. There was no failing pod to describe, because a rejected pod is never created.
+Why scale 0 then 5 worked. Old-revision pods keep consuming quota while a rolling update tries to surge new ones, so the new pods were rejected. Scaling to 0 freed the quota. A cleaner approach is to set maxSurge: 0 and maxUnavailable: 1 on the Deployment, or use strategy: Recreate.
+
+A cleaner fix
+
+Setting explicit requests and limits that fit the quota:
+
+bash
+kubectl set resources deploy batch -n team-a \
+  --requests=cpu=200m,memory=128Mi --limits=cpu=400m,memory=200Mi
+
+The totals are 1000m requests.cpu (limit 1), 2000m limits.cpu (limit 2), and 1000Mi limits.memory (limit 1024Mi), so 5 pods fit exactly. Your 50m/150Mi limits also work, since requests default to the limits when only limits are set. But 50m CPU is very tight for a real nginx under load, so a sensible answer matters in a real task.
+
+Verify with k describe quota team-quota -n team-a.
+
