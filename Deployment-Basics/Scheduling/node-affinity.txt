@@ -1,0 +1,280 @@
+Your cluster is the same, but these questions need both nodes to be schedulable so that affinity decisions are visible.
+
+Before you start (whole set)
+
+bash
+# let pods land on controlplane too (restored in cleanup)
+k taint node controlplane node-role.kubernetes.io/control-plane:NoSchedule-
+
+# clean slate
+k label node node01 disk- zone- env- tier- gen- speed- region- 2>/dev/null
+k label node controlplane disk- zone- env- gen- maintenance- speed- region- 2>/dev/null
+
+Question 1: Operators (In, NotIn, Exists, DoesNotExist, Gt, Lt)
+
+Setup:
+
+bash
+k create ns aff1
+k label node node01 disk=ssd gen=5
+k label node controlplane disk=hdd gen=3 maintenance=true
+
+Tasks:
+
+Create pod matrix (image nginx) in aff1 with required node affinity. All of these must hold:
+disk is in ssd or nvme
+gen is greater than 4
+the label maintenance does not exist
+Create pod matrix2 that must run on nodes where gen is less than 4.
+Write the node each pod landed on to /tmp/a1-matrix.txt and /tmp/a1-matrix2.txt (jsonpath).
+Create matrix3 that requires gen greater than 5. It will be Pending. Write the scheduler’s message (just the message text, not the whole Events line) to /tmp/a1-reason.txt.
+
+
+Question 1 results look right.
+
+What your output confirms
+
+matrix is on node01. Only node01 has disk=ssd, gen=5 and no maintenance label, so it’s the only valid node.
+matrix2 is on controlplane. It’s the only node with gen=3, which is less than 4.
+matrix3 is Pending because gen>5 fails on both nodes. node01 has gen=5, which is not greater than 5, and controlplane has gen=3. Your message in /tmp/a1-reason.txt is the message text without the Events columns, which is what the task asked for.
+
+One thing describe can’t show you
+
+Node-Selectors: <none> is expected, since you used affinity. But k describe pod doesn’t print the affinity block, so I can’t confirm from this output that your rules are written correctly. matrix could have landed on node01 by chance, because the control plane is untainted for this set. Check the rule itself:
+
+bash
+k get pod matrix -n aff1 -o yaml | grep -A20 affinity
+
+For matrix, you should see all three conditions as separate entries inside one matchExpressions (that’s AND):
+
+yaml
+affinity:
+  nodeAffinity:
+    requiredDuringSchedulingIgnoredDuringExecution:
+      nodeSelectorTerms:
+      - matchExpressions:
+        - key: disk
+          operator: In
+          values: ["ssd", "nvme"]
+        - key: gen
+          operator: Gt
+          values: ["4"]
+        - key: maintenance
+          operator: DoesNotExist
+
+Common mistakes to look for:
+
+Gt/Lt values must be quoted strings ("4"), with exactly one value.
+DoesNotExist takes no values field.
+If each condition has its own - matchExpressions: dash, it becomes OR, and the pod could land on either node.
+
+Quick negative test (1 minute)
+
+bash
+k label node controlplane maintenance- 
+k run matrix4 -n aff1 --image=nginx --dry-run=client -o yaml > m4.yaml
+
+Copy the affinity block from matrix into m4.yaml, apply it, and check where it lands. controlplane has disk=hdd and gen=3, so it should still be rejected on the disk and gen rules even without maintenance. This proves each expression is being enforced, not just the last one.
+
+A note on your files
+
+/tmp/a1-matrix.txt and /tmp/a1-matrix2.txt have no trailing newline. That’s normal for jsonpath output, and it’s why your prompt appeared right after node01. It’s fine for a checker that compares trimmed content, but add ; echo if you want a clean line.
+
+Send Question 2 (AND vs OR with nodeSelectorTerms) when you’re ready. That’s the one where the dash placement matters most.
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+Question 2: AND vs OR (nodeSelectorTerms vs matchExpressions)
+
+Setup:
+
+bash
+k create ns aff2
+k label node node01 env=prod disk=ssd zone=a
+k label node controlplane zone=b
+
+Tasks:
+
+Create Deployment or-app (nginx, 4 replicas) in aff2 that may run on a node if either of these is true:
+zone is b
+env is prod and disk is ssd
+Save k get pods -n aff2 -o wide to /tmp/a2-before.txt.
+Remove the env label from node01. Scale the Deployment to 0 and back to 4. Save the new -o wide output to /tmp/a2-after.txt.
+Now edit the Deployment so that env=prod or disk=ssd alone is enough on node01, in addition to zone=b. Verify that node01 is eligible again after another scale cycle.
+In one sentence, state which YAML level means AND and which means OR.
+Correct YAML for your requirement
+Replace your affinity section with:
+
+
+yaml
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: zone
+                operator: In
+                values:
+                - b
+            - matchExpressions:
+              - key: env
+                operator: In
+                values:
+                - prod
+              - key: disk
+                operator: In
+                values:
+                - ssd
+Understand the difference
+Your requirement:
+
+
+text
+zone=b OR (env=prod AND disk=ssd)
+The YAML represents it like this:
+
+
+text
+nodeSelectorTerms:
+  - term 1:
+      zone=b
+
+  - term 2:
+      env=prod
+      disk=ssd
+First - creates the first term.
+
+Second - creates the second term.
+
+Both expressions inside the second term must match.
+
+Validate and apply
+
+bash
+k apply --dry-run=server -f orapp.yaml
+k apply -f orapp.yaml
+CKA exam golden rule: nodeSelectorTerms is a list of OR conditions, and matchExpressions is a list of AND conditions.
+
+Question 3: Preferred affinity and weights
+
+Setup:
+
+bash
+k create ns aff3
+k label node node01 speed=fast
+k label node controlplane speed=medium region=east
+
+Tasks:
+
+Create Deployment pref-app (nginx, 6 replicas) in aff3 with:
+a required rule: kubernetes.io/os is linux
+a preferred rule, weight 80: speed=fast
+a preferred rule, weight 20: region=east
+Write the pod count per node to /tmp/a3-counts.txt. A one-liner helps: k get pods -n aff3 -o wide --no-headers | awk '{print $7}' | sort | uniq -c.
+Change the weight-80 rule to speed=turbo (no node has it). Confirm the pods still schedule after a rollout.
+Create a second Deployment req-app (1 replica) that requires speed=turbo. Observe it.
+In one sentence, explain why the preferred rule can’t guarantee that all 6 pods land on node01.
+
+Question 4: Troubleshooting a multi-expression rule
+
+Setup:
+
+bash
+k create ns aff4
+k label node node01 topology.kubernetes.io/zone=us-east-1a gen=4
+cat <<'EOF' | kubectl apply -f -
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: payments
+  namespace: aff4
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: payments
+  template:
+    metadata:
+      labels:
+        app: payments
+    spec:
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: topology.kubernetes.io/zone
+                operator: In
+                values: ["us-east-1b"]
+              - key: gen
+                operator: Gt
+                values: ["4"]
+              - key: tier
+                operator: Exists
+      containers:
+      - name: nginx
+        image: nginx
+EOF
+
+Tasks:
+
+The intent is: run only on nodes in zone us-east-1a with a gen of at least 4, with no other requirement. Find every reason the pods are Pending. (The scheduler message won’t tell you which expression failed, so compare the pod’s affinity against k get nodes --show-labels.)
+Fix it in the Deployment only. Don’t touch the node labels.
+Verify all 3 replicas are Running on node01.
+Write the three problems you found, one per line, to /tmp/a4-bugs.txt.
+
+Question 5: nodeSelector and affinity together (troubleshooting)
+
+Setup:
+
+bash
+k create ns aff5
+k label node node01 disk=ssd zone=a
+k label node controlplane zone=b
+cat <<'EOF' | kubectl apply -f -
+apiVersion: v1
+kind: Pod
+metadata:
+  name: stuck
+  namespace: aff5
+spec:
+  nodeSelector:
+    disk: ssd
+  affinity:
+    nodeAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        nodeSelectorTerms:
+        - matchExpressions:
+          - key: zone
+            operator: In
+            values: ["b"]
+  containers:
+  - name: nginx
+    image: nginx
+EOF
+
+Tasks:
+
+Find out why stuck is Pending. Write the names of the nodes matching the nodeSelector to /tmp/a5-sel.txt and those matching the affinity to /tmp/a5-aff.txt, using label selectors.
+Fix it so the pod runs on node01 without changing any node label. Remember that a pod’s scheduling fields are immutable, so decide how you will recreate it (hint: k replace --force).
+Add a preferred rule (weight 50) for zone=a to the fixed pod.
+Remove the zone label from node01. Does the pod get evicted? Write yes or no to /tmp/a5-evict.txt.
+In one sentence, state how the scheduler treats a pod that has both a nodeSelector and node affinity.
+
+Cleanup
+
+bash
+k label node node01 disk- zone- env- tier- gen- speed- region- topology.kubernetes.io/zone-
+k label node controlplane disk- zone- env- gen- maintenance- speed- region-
+k taint node controlplane node-role.kubernetes.io/control-plane:NoSchedule
+k delete ns aff1 aff2 aff3 aff4 aff5
+
+Verify with k describe node controlplane | grep Taints afterwards.
+
+Hints without spoilers
+
+k explain pod.spec.affinity.nodeAffinity --recursive | less shows the structure. In the docs, search “Assign Pods to Nodes” and copy the requiredDuringScheduling... example.
+Gt and Lt take exactly one value, written as a string of an integer (["4"]). Exists and DoesNotExist take no values.
+Dashes matter: each - matchExpressions under nodeSelectorTerms is a separate term (OR). Several - key: entries inside one matchExpressions are ANDed.
+weight is 1 to 100, and each preferred entry has weight plus a preference block (not nodeSelectorTerms).
+kubectl rollout restart or scaling to 0 and back lets you re-run scheduling for a Deployment.
+
+Time target: 10 to 12 minutes each. Send YAMLs, commands or outputs for any question and I’ll review them. After this set, the next topic is taints and tolerations.

@@ -1,0 +1,202 @@
+Question 1: Label a node and schedule with nodeSelector
+
+Create namespace sched.
+Label node01 with disk=ssd.
+Create a pod ssd-pod (image nginx) in sched that must run only on nodes labeled disk=ssd.
+Confirm it is Running, then write the name of the node it landed on to /tmp/q1.txt using a jsonpath command (not by typing it).
+
+
+->Question 1 is done. ssd-pod is Running on node01, and node01 shows disk=ssd in its labels. The nodeSelector in your YAML is correct.
+
+One thing to notice in your YAML
+
+yaml
+metadata:
+  labels:
+    disk: ssd      # this is a POD label
+spec:
+  nodeSelector:
+    disk: ssd      # this is what the scheduler uses
+
+The disk: ssd under metadata.labels is a label on the pod itself. It does nothing for scheduling. Only spec.nodeSelector is matched against node labels. Both use the same key and value here, which is easy to mix up. k run ssd-pod --image=nginx --dry-run=client -o yaml puts run: ssd-pod there by default, so you may have edited that line by mistake. It’s harmless, but the task doesn’t need it.
+
+Check the last requirement
+
+The task asked you to write the node name to /tmp/q1.txt using jsonpath:
+
+bash
+k get pod ssd-pod -n sched -o jsonpath='{.spec.nodeName}' > /tmp/q1.txt
+cat /tmp/q1.txt
+
+It should print node01.
+
+Reading your describe output
+
+Taints: <none> on node01 is why it accepts pods freely.
+kubernetes.io/hostname=node01 is a built-in label, so nodeSelector: kubernetes.io/hostname: node01 would also have worked without labeling anything.
+Under Non-terminated Pods, ssd-pod appears with 0 requests. That’s the node confirming the pod is placed on it.
+
+Quick extra test (1 minute)
+
+bash
+k get nodes -l disk=ssd
+k label node node01 disk-
+k get pod ssd-pod -n sched
+
+The pod stays Running after the label is removed, because the rule is IgnoredDuringExecution: it only matters at scheduling time. Then delete and recreate the pod and it will go Pending. Re-add the label with k label node node01 disk=ssd to continue.
+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+Question 2: Label management
+
+Label controlplane with env=prod. Label node01 with env=dev and tier=backend.
+Write the names of nodes where env=prod to /tmp/q2-prod.txt, using a label selector, not grep.
+Change controlplane’s env label to staging in a single command (no removing and re-adding).
+Remove the tier label from node01.
+Write the names of nodes that do not have a tier label to /tmp/q2-notier.txt, using a selector.
+Question 2 is done, and your end state is correct.
+
+What your output confirms
+
+node01 has env=dev and no tier label (removed).
+controlplane has env=staging (changed from prod), so the --overwrite step worked.
+/tmp/q2-prod.txt contains controlplane. That’s correct because you wrote it while env=prod was still set. Run after the change, the selector would return nothing.
+/tmp/q2-notier.txt contains both nodes. That’s also correct, since after step 4 neither node has a tier label.
+
+The commands this task drilled
+
+bash
+k label node controlplane env=prod
+k label node node01 env=dev tier=backend       # multiple labels in one command
+k get nodes -l env=prod -o name                # output: node/controlplane
+k label node controlplane env=staging --overwrite
+k label node node01 tier-                      # trailing dash removes
+k get nodes -l '!tier'                         # nodes WITHOUT the label (quotes needed)
+
+Your files contain plain names without the node/ prefix. That’s fine, but if a task asks for a specific format, remember -o name adds the prefix. Use --no-headers or -o jsonpath='{.items[*].metadata.name}' for bare names.
+
+Also useful: -l 'env in (prod,staging)' and -l 'env!=dev' work too, and k get nodes --show-labels shows everything at once.
+
+Cleanup before Question 3
+
+bash
+k label node controlplane env-
+k label node node01 env- disk-
+
+I’d remove disk too, because Question 3 needs the Pending state first (the pod asks for disk=nvme, which no node has yet).
+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+Question 3: Pending pod (troubleshooting)
+
+Setup:
+
+bash
+k create ns sched3
+k run pending-pod -n sched3 --image=nginx \
+  --overrides='{"spec":{"nodeSelector":{"disk":"nvme"}}}'
+
+Tasks:
+
+Find out why pending-pod is not running. Write the exact scheduler message from the Events to /tmp/q3-reason.txt.
+Make the pod run without deleting it and without editing it.
+Confirm it is Running on node01.
+Remove the label from the node. Check whether the pod is evicted, and be ready to explain why or why not.
+
+Yes, exactly right. The nodeSelector is checked only at the moment the scheduler picks a node. Once the pod is bound to node01 and the kubelet is running it, nothing re-checks the label. The scheduling rule names for this are ...IgnoredDuringExecution: node affinity has requiredDuringSchedulingIgnoredDuringExecution, and nodeSelector behaves the same way.
+
+What your output shows
+
+Before the label: the Events said 1 node(s) didn't match Pod's node affinity/selector (that’s node01, no disk=nvme) and 1 node(s) had untolerated taint(s) (that’s controlplane). Both nodes were filtered out, so the pod stayed Pending.
+After k label node node01 disk=nvme: the scheduler retried on its own, found node01 matched, and the pod went Running without you touching it.
+After k label node node01 disk-: the pod kept running, because the rule is only evaluated at scheduling time.
+
+The catch to remember
+
+The label is gone, but the pod is still on node01. If that pod is deleted or recreated (or a Deployment replaces it), the new pod would go Pending again, because no node has disk=nvme anymore. You can test it:
+
+bash
+k get pod pending-pod -n sched3 -o yaml > p.yaml
+k delete pod pending-pod -n sched3
+k apply -f p.yaml     # may need to strip status/nodeName fields first
+
+Simpler: k run again -n sched3 --image=nginx --overrides='{"spec":{"nodeSelector":{"disk":"nvme"}}}' and watch it go Pending.
+
+Contrast with taints
+
+A NoExecute taint is the one that does evict running pods. That’s why taints have effects (NoSchedule, PreferNoSchedule, NoExecute), while labels only affect placement. You’ll see this in the taints topic.
+
+One small fix on your /tmp/q3-reason.txt
+
+It contains the whole Events line, including Warning FailedScheduling 4m12s default-scheduler. The task said “the exact scheduler message”, so the part after default-scheduler is the message itself. That’s fine for practice, but on the exam, check whether the task wants the full line or just the message. To get only the message:
+
+bash
+k get events -n sched3 --field-selector reason=FailedScheduling -o jsonpath='{.items[0].message}' > /tmp/q3-reason.txt
+
+Cleanup: k label node node01 disk- is already done. Send Question 4 when you’re ready.
+Question 4: Deployment with a bad nodeSelector (troubleshooting)
+
+Setup:
+
+bash
+k create ns sched4
+cat <<'EOF' | kubectl apply -f -
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api
+  namespace: sched4
+spec:
+  replicas: 4
+  selector:
+    matchLabels:
+      app: api
+  template:
+    metadata:
+      labels:
+        app: api
+    spec:
+      nodeSelector:
+        tier: backned
+      containers:
+      - name: nginx
+        image: nginx
+EOF
+
+Tasks:
+
+The intended behavior is that all 4 pods run on nodes labeled tier=backend. Label node01 with tier=backend.
+The pods are still Pending. Find the cause and fix it in the Deployment, not by relabeling the node to match the typo.
+Verify all 4 replicas are Running on node01.
+Write the output of k get pods -n sched4 -o wide to /tmp/q4.txt.
+
+Question 5: Multiple labels and the control plane (troubleshooting)
+
+Setup:
+
+bash
+k create ns sched5
+k run cp-pod -n sched5 --image=nginx \
+  --overrides='{"spec":{"nodeSelector":{"kubernetes.io/hostname":"controlplane"}}}'
+k run two-label -n sched5 --image=nginx \
+  --overrides='{"spec":{"nodeSelector":{"disk":"ssd","zone":"a"}}}'
+
+Tasks:
+
+Label node01 with disk=ssd only. Both pods will be Pending. Find the reason for each.
+Fix two-label so it runs, without touching the pod spec.
+For cp-pod, the hostname label matches controlplane, yet the pod is still Pending. Write the taint key from the scheduler message to /tmp/q5-taint.txt. Don’t fix it yet, since tolerations are the next topic. Delete the pod afterwards.
+Answer in one sentence: when a nodeSelector lists two labels, is it AND or OR?
+
+Cleanup when you’re done
+
+bash
+k label node node01 disk- tier- env- zone-
+k label node controlplane env-
+k delete ns sched sched3 sched4 sched5
+
+Hints without spoilers
+
+k label node <n> key=value, --overwrite to change, and key- to remove.
+k get nodes -l 'key=value', -l '!key' (needs quotes), and -o name or -o jsonpath for clean output.
+k describe pod <p> -n <ns> and read the Events section. The 0/2 nodes are available... line gives the reason per node.
+A running pod’s nodeSelector can’t be edited, but a Deployment’s pod template can.
+
+Send your YAMLs, commands or outputs for any question and I’ll review them. After this set, the next topics are node affinity, then taints and tolerations.
