@@ -63,4 +63,59 @@ kubectl set resources deploy batch -n team-a \
 The totals are 1000m requests.cpu (limit 1), 2000m limits.cpu (limit 2), and 1000Mi limits.memory (limit 1024Mi), so 5 pods fit exactly. Your 50m/150Mi limits also work, since requests default to the limits when only limits are set. But 50m CPU is very tight for a real nginx under load, so a sensible answer matters in a real task.
 
 Verify with k describe quota team-quota -n team-a.
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 
+Question 2: ConfigMap as env + volume
+In namespace app2, create a ConfigMap app-config with APP_MODE=production and LOG_LEVEL=debug. Create a pod config-pod (image busybox, command sleep 3600) that:
+
+loads APP_MODE as an environment variable using configMapKeyRef
+mounts the whole ConfigMap as a volume at /etc/config
+
+Exec into the pod and confirm both the env var and the files exist.
+That output is exactly right: production from the env var, APP_MODE and LOG_LEVEL as files in /etc/config, and debug from the file content.
+
+The debug and your prompt appearing on the same line (debugvboxuser@cp1...) is normal. ConfigMap files are written without a trailing newline, so cat doesn’t end with one. If you want clean output, use cat file; echo.
+
+Question 2 is done. Before moving on, here is the shape of Question 3 so you can try it on your own first:
+
+kubectl create secret generic db-secret -n app3 --from-literal=username=admin --from-literal=password=S3cur3Pass
+env: same as before but secretKeyRef (fields name and key)
+volume: secret: with secretName: (not name:, this is the one that trips people up)
+mount: add readOnly: true on the volumeMounts entry
+
+Run kubectl explain pod.spec.volumes.secret to confirm the field names. Remember the Q3 task uses a deployment with 2 replicas, so generate the base with:
+
+bash
+k create deploy db-app --image=nginx --replicas=2 -n app3 --dry-run=client -o yaml > deploy.yaml
+
+Then add the env, volumes and volumeMounts sections. Note that in a deployment these go under spec.template.spec, not spec. Send me your YAML when ready.
+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+Question 3: Secret as env + read-only volume
+In namespace app3, create a Secret db-secret with username=admin and password=S3cur3Pass. Create a deployment db-app (image nginx, 2 replicas) that:
+
+injects DB_USER and DB_PASS from the secret using secretKeyRef
+mounts the secret at /etc/db-creds as readOnly
+
+Verify the files and env vars inside one of the pods.
+
+
+
+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+Question 4: Fix a Pending PVC
+A PVC broken-pvc in namespace app4 is stuck in Pending. Its spec: storageClassName: fast, request 2Gi, ReadWriteOnce. A PV pv-broken exists with storageClassName: slow, 1Gi capacity, ReadWriteOnce. Investigate and fix this without deleting the PVC (hint: PVC specs are mostly immutable, so decide what you can change on the PV side or what you must recreate). Then create a pod fix-pod that mounts the bound PVC at /data.
+
+
+
+
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+Question 5: Multi-source pod (PVC + ConfigMap + Secret + env)
+In namespace app5, create a pod full-pod (image busybox, command sleep 3600) that uses all of the following:
+
+PVC logs-pvc (200Mi, RWO, storageClassName: manual, backed by a PV you create at hostPath /mnt/logs) mounted at /var/log/app
+ConfigMap app-settings with ENV=staging, injected through envFrom
+Secret api-key with API_KEY=abc123, injected as env var API_KEY
+a subPath mount of one ConfigMap key to /etc/app/settings.conf
+
+Write a file into /var/log/app, delete the pod, recreate it, and confirm the file persisted.
+
+Send me your YAMLs or commands for any of these and I’ll review them, or ask for the solutions when you’re done. If you want, I can also add a timer-style setup, like 8 to 10 minutes per question, to match exam pace.
