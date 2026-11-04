@@ -1,0 +1,374 @@
+Question 1: Taint effects, operators and the wildcard toleration
+
+Setup:
+
+bash
+k create ns taint1
+k run already -n taint1 --image=nginx          # lands on node01, since controlplane is tainted
+k taint node node01 app=blue:NoSchedule
+
+Tasks:
+
+Check that already is still Running after the taint. Answer in one line to /tmp/t1-already.txt: why was it not evicted?
+Create pod plain (nginx) with no toleration. It will be Pending. Write the scheduler message only (not the whole Events line) to /tmp/t1-reason.txt.
+Create pod eq-ok that tolerates app=blue:NoSchedule using operator: Equal. Create eq-wrong that tolerates app=green:NoSchedule. Report which one runs.
+Create pod exists-ok that tolerates the key app using operator: Exists and no value. It must run on node01.
+Create pod wild with the shortest possible toleration that tolerates every taint in the cluster, and force it onto controlplane using a nodeSelector on the hostname label. Don’t use nodeName.
+Write each node’s name and its taint keys to /tmp/t1-taints.txt using custom-columns.
+Remove the app taint from node01 in one command, then check that plain gets scheduled without you touching it.
+
+Question 2: NoExecute, eviction and tolerationSeconds
+
+Setup:
+
+bash
+k create ns taint2
+k create deploy web -n taint2 --image=nginx --replicas=4
+k run no-tol -n taint2 --image=nginx
+cat <<'EOF' | kubectl apply -f -
+apiVersion: v1
+kind: Pod
+metadata: {name: tol-60, namespace: taint2}
+spec:
+  tolerations:
+  - {key: maintenance, operator: Equal, value: "true", effect: NoExecute, tolerationSeconds: 60}
+  containers: [{name: nginx, image: nginx}]
+---
+apiVersion: v1
+kind: Pod
+metadata: {name: tol-forever, namespace: taint2}
+spec:
+  tolerations:
+  - {key: maintenance, operator: Equal, value: "true", effect: NoExecute}
+  containers: [{name: nginx, image: nginx}]
+EOF
+k get pods -n taint2 -o wide     # everything on node01
+
+Tasks:
+
+Apply maintenance=true:NoExecute to node01 and watch with k get pods -n taint2 -w.
+Write to /tmp/t2-results.txt one line per pod type: what happened to no-tol, the web pods, tol-60 (and after how long) and tol-forever.
+Explain in one line in /tmp/t2-bare.txt why no-tol never comes back but the web pods are recreated (as Pending).
+Run k describe pod tol-forever -n taint2 | grep -A3 Tolerations. Write the two default tolerations you see (key, effect and seconds) to /tmp/t2-defaults.txt, and say what they protect against.
+Remove the taint and confirm that the web pods get scheduled.
+
+Question 3: Multiple taints, effects and removal syntax
+
+Setup:
+
+bash
+k create ns taint3
+k taint node node01 dedicated=gpu:NoSchedule team=ml:NoSchedule tier=batch:PreferNoSchedule
+
+Tasks:
+
+Create pod one-tol that tolerates only dedicated=gpu:NoSchedule. Find out why it is Pending.
+Create pod two-tol that tolerates dedicated and team but not tier. It should run. Write a one-line reason to /tmp/t3-prefer.txt for why the untolerated PreferNoSchedule taint doesn’t block it.
+Create pod key-only that tolerates both blocking taints by key only (operator: Exists, no effect, no value).
+Create pod wrong-effect that tolerates dedicated=gpu with effect: NoExecute. It stays Pending. Write the reason to /tmp/t3-effect.txt.
+Remove only the team taint, then remove every taint with key dedicated regardless of effect, using the two different removal forms. Write both commands to /tmp/t3-remove.txt.
+Add dedicated=gpu:NoExecute to node01. Which of your running pods are evicted and which survive? Write the pod names that survive to /tmp/t3-survive.txt.
+
+---->
+Good attempt. Some parts are right, a few need fixing, and for #5 I’ll show you both forms.
+
+1) one-tol: right
+
+one-tol tolerates dedicated=gpu:NoSchedule but not team=ml:NoSchedule. A pod needs a toleration for every NoSchedule taint on the node, so one missing toleration blocks it. The PreferNoSchedule taint (tier) is soft and doesn’t block.
+
+2) two-tol: right idea, but one correction
+
+You wrote “team has preferNoSchedule”, but that’s mixed up. In the setup:
+
+dedicated=gpu:NoSchedule and team=ml:NoSchedule are hard taints.
+tier=batch:PreferNoSchedule is the soft one.
+
+So two-tol tolerates both hard taints and runs. The reason for /tmp/t3-prefer.txt is: PreferNoSchedule is only a preference, so the scheduler tries to avoid the node but will still use it when nothing else fits. Here node01 is the only schedulable node.
+
+3) key-only: not quite
+
+Your file tolerates dedicated and team, but it still has effect: "NoSchedule" on both. The task said “by key only”, meaning no effect and no value. Remove the effect lines:
+
+yaml
+spec:
+  tolerations:
+  - key: dedicated
+    operator: Exists
+  - key: team
+    operator: Exists
+  containers:
+  - image: nginx
+    name: key-only
+
+With no effect, the toleration matches that key with any effect (NoSchedule, PreferNoSchedule and NoExecute). Fix the indentation too: the blank lines are fine, but keep containers: at the same column as tolerations:.
+
+4) wrong-effect: right
+
+The toleration says NoExecute, but the taint’s effect is NoSchedule. The effect has to match, so the toleration doesn’t apply. Also, wrong-effect only tolerates dedicated, so it would still be blocked by team even with the right effect. Write the reason as: toleration effect NoExecute does not match the taint's effect NoSchedule, so it doesn't apply.
+
+5) Removal: the two forms
+
+bash
+# form 1: remove one specific taint (exact key=value:effect)
+k taint node node01 team=ml:NoSchedule-
+
+# form 2: remove ALL taints with that key, any value or effect
+k taint node node01 dedicated-
+
+You already knew form 2. Form 1 is the one that removes only a single taint. A third variant, key:Effect- (for example dedicated:NoSchedule-), removes only that effect for the key. Put both commands in /tmp/t3-remove.txt.
+
+6) NoExecute taint: your answer needs checking
+
+Setup for this step: add dedicated=gpu:NoExecute to node01. You wrote “only wrong-effect survived”. Check that against the toleration rules:
+
+wrong-effect tolerates dedicated=gpu:NoExecute, so it survives. That’s the whole point of its odd toleration.
+one-tol was Pending, so there’s nothing to evict.
+two-tol and key-only ran. two-tol has NoSchedule tolerations only, so the NoExecute taint evicts it. key-only, once you remove the effect line, has no effect set, so it tolerates NoExecute too and survives.
+
+So the survivors are wrong-effect and (after your fix) key-only. Verify:
+
+bash
+k get pods -n taint3
+
+Write the names of the pods still Running to /tmp/t3-survive.txt.
+
+What Question 3 drilled
+
+A pod must tolerate every hard taint (NoSchedule and NoExecute) on a node.
+PreferNoSchedule is a soft preference and never blocks on its own.
+The toleration effect must match the taint’s, or be omitted to match all.
+Remove with key=value:Effect- for one taint, or key- for every taint with that key.
+
+Send Question 4 (dedicated node, DaemonSet and the control plane) when you’re ready.
+--------------------------------------------------------------------------------------------------------------------------------------------
+Question 4: Dedicated node, DaemonSet and the control plane
+
+Setup:
+
+bash
+k create ns taint4
+k label node node01 team=payments
+k taint node node01 team=payments:NoSchedule
+
+Tasks:
+
+Create Deployment pay (nginx, 3 replicas) that runs only on node01, using the toleration plus one other mechanism. Verify with -o wide.
+Create Deployment other (nginx, 3 replicas) with no scheduling rules. Verify that none of its pods are on node01, and write where they are (or their state) to /tmp/t4-other.txt.
+Create DaemonSet agent (busybox, sleep 3600) that runs exactly one pod per node, including controlplane, with the minimum tolerations. Verify 2 pods.
+Create pod cp-only that runs on controlplane using a toleration and a nodeSelector (no nodeName).
+In one line to /tmp/t4-why.txt, state why a toleration alone doesn’t send pay to node01.
+Find the tolerations of the existing DaemonSets in kube-system (for example with k get ds -n kube-system -o yaml | grep -A8 tolerations). Write to /tmp/t4-system.txt which broad toleration lets them run on every node.
+Most of this is right. Items 5 and 6 need correcting, and the DaemonSet is in the wrong namespace.
+
+1) pay: correct
+
+The toleration (team=payments:NoSchedule) lets the pods onto node01, and the nodeSelector on kubernetes.io/hostname sends them there. All 3 are on node01. A label like team=payments plus a nodeSelector or affinity would work too, but the hostname label is fine.
+
+2) other: correct
+
+All 3 are Pending. controlplane has the control-plane taint and node01 has team=payments:NoSchedule, so no node accepts them. For /tmp/t4-other.txt, write “Pending, no node tolerated”.
+
+3) DaemonSet agent: works, but check two things
+
+Your output shows agent in the default namespace, with one pod per node, which is the right behavior. The task didn’t name a namespace, so that’s acceptable. I want to confirm the tolerations are the minimum. You need two, one for each taint:
+
+yaml
+tolerations:
+- key: node-role.kubernetes.io/control-plane
+  operator: Exists
+  effect: NoSchedule
+- key: team
+  operator: Equal
+  value: payments
+  effect: NoSchedule
+
+I told you earlier that the minimum was only the control-plane toleration. That was wrong for this setup. node01 carries team=payments:NoSchedule too, so a DaemonSet with only the control-plane toleration would get a pod on controlplane and none on node01. Since you got a pod on both, your DaemonSet must already tolerate both. Check with:
+
+bash
+k get ds agent -o yaml | grep -A10 tolerations
+
+4) cp-only: correct
+
+A toleration for the control-plane taint plus nodeSelector: kubernetes.io/hostname: controlplane puts it on controlplane. Toleration allows, nodeSelector sends.
+
+5) Why a toleration alone doesn’t send pay to node01: you already showed it
+
+You wrote “I used nodeSelector and tolerations and it went there”. That is the answer. Put this in /tmp/t4-why.txt:
+
+A toleration only permits scheduling on a tainted node; it doesn't attract the pod. Without a nodeSelector or affinity, the scheduler could place it on any node it tolerates.
+
+Here controlplane is tainted too and pay doesn’t tolerate that, so it wouldn’t go there, but on a cluster with untainted nodes the pod could land anywhere. To truly dedicate a node you need both halves: taint plus toleration, and label plus nodeSelector or affinity.
+
+6) System DaemonSets: your answer isn’t it
+
+kubernetes.io/os=linux is a node selector, not a toleration. Run:
+
+bash
+k get ds -n kube-system -o yaml | grep -B2 -A8 tolerations
+
+You’ll see this on the cilium DaemonSet:
+
+yaml
+tolerations:
+- operator: Exists
+
+An empty key with operator: Exists and no effect is the wildcard that tolerates every taint. That’s why system DaemonSets run on every node, including tainted ones. Write that to /tmp/t4-system.txt.
+
+Cleanup before Question 5
+
+bash
+k taint node node01 team-
+k label node node01 team-
+k delete ns taint4
+k delete ds agent
+
+Send your Question 5 output when you’re ready. That’s the troubleshooting one where each Deployment has a different bug (value mismatch, wrong effect, wrong case on the key).
+
+Two separate things here, and your DaemonSet output answers the first one.
+
+Your agent DaemonSet is correct
+
+It has exactly the two tolerations it needs:
+
+team=payments:NoSchedule for node01
+node-role.kubernetes.io/control-plane:NoSchedule for controlplane
+
+Each toleration matches one taint, so you get one pod per node. That is the minimum for this setup. Ignore my earlier wording that the control-plane toleration alone was enough. It would have missed node01.
+
+Why node01 having no such taint is not a problem
+
+You’re right that node01 has no taint matching operator: Exists. A toleration is not something the node has. It belongs to the pod, and it only says “I can accept these taints if they exist”. It can be broader than the taints actually present, and nothing breaks.
+
+The tolerations: - operator: Exists I mentioned is on the system DaemonSets in kube-system (for example cilium), not on the node. For /tmp/t4-system.txt, the question was which toleration lets those DaemonSets run on every node. To see it:
+
+bash
+k get ds -n kube-system -o yaml | grep -B2 -A6 tolerations
+
+Look at the cilium entry. If it shows - operator: Exists, that is the wildcard: empty key plus Exists plus no effect matches every taint. That’s why it can run on controlplane and node01 regardless of their taints.
+
+The grep may show several DaemonSets. If one of them (like kube-proxy) lists a different toleration, the answer for that one is whatever it prints. Use what your cluster shows, not my assumption.
+
+Wildcard vs minimum, side by side
+
+Toleration	Matches	Use when
+operator: Exists (no key)	every taint on any node	system agents that must run everywhere
+key: team, Equal, payments, NoSchedule	only that one taint	you want precise control
+key: team, Exists (no effect)	that key with any effect	you want to cover all effects for one key
+
+Your DaemonSet used the precise form, which is what “minimum” asked for.
+
+Paste the kube-system grep output if you want me to confirm which toleration those DaemonSets use. Then send your Question 5 results.
+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+Question 5: Troubleshooting, cordon and drain
+
+Setup:
+
+bash
+k create ns taint5
+k taint node node01 env=prod:NoSchedule
+cat <<'EOF' | kubectl apply -f -
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: app-a, namespace: taint5}
+spec:
+  replicas: 2
+  selector: {matchLabels: {app: app-a}}
+  template:
+    metadata: {labels: {app: app-a}}
+    spec:
+      tolerations:
+      - {key: env, operator: Equal, value: production, effect: NoSchedule}
+      containers: [{name: nginx, image: nginx}]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: app-b, namespace: taint5}
+spec:
+  replicas: 2
+  selector: {matchLabels: {app: app-b}}
+  template:
+    metadata: {labels: {app: app-b}}
+    spec:
+      tolerations:
+      - {key: env, operator: Equal, value: prod, effect: NoExecute}
+      containers: [{name: nginx, image: nginx}]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: app-c, namespace: taint5}
+spec:
+  replicas: 2
+  selector: {matchLabels: {app: app-c}}
+  template:
+    metadata: {labels: {app: app-c}}
+    spec:
+      tolerations:
+      - {key: Env, operator: Exists, effect: NoSchedule}
+      containers: [{name: nginx, image: nginx}]
+EOF
+
+Tasks:
+
+All three Deployments are Pending. Find the exact bug in each and fix it in the Deployment, without touching the node taint. Write one line per Deployment to /tmp/t5-causes.txt.
+Verify all 6 pods are Running on node01.
+Cordon node01. Run k describe node node01 | grep -i -A2 taints and write the extra taint that appears to /tmp/t5-cordon.txt.
+Scale app-a to 4 and observe the new pods. Then uncordon.
+Drain node01 (decide which flags the command needs, since cilium DaemonSet pods live there). Describe what happens to your 6 pods and why they can’t be rescheduled elsewhere. Then uncordon.
+In one line each to /tmp/t5-diff.txt: how does cordon differ from a NoExecute taint, and what does drain do that cordon doesn’t?
+
+Question 5 is nearly all correct. Item 3 needs the actual taint name, and item 6 has one point backwards.
+
+1) Causes: all three correct
+
+app-a: the toleration value is production, but the taint value is prod. With Equal, the value must match exactly.
+app-b: the toleration effect is NoExecute, but the taint’s effect is NoSchedule. The effect must match, or be omitted.
+app-c: keys are case-sensitive, so Env doesn’t match env.
+
+2) Running: correct
+
+All 6 pods are Running. Check they’re on node01 with k get pods -n taint5 -o wide.
+
+3) Cordon: right field, but the task asked for the taint
+
+Unschedulable: true is the node field. The taint that cordon adds shows up on the Taints: line:
+
+node.kubernetes.io/unschedulable:NoSchedule
+
+Write that to /tmp/t5-cordon.txt. It’s the NoSchedule effect, which is why cordon doesn’t touch running pods.
+
+4) New pods Pending: correct
+
+The two new app-a pods are Pending because the node is cordoned and controlplane is tainted. After k uncordon node01, they schedule by themselves, since the app-a toleration now matches env=prod.
+
+5) Drain: correct reasoning
+
+Drain cordons the node and then evicts the pods. The Deployments recreate them, but both nodes now reject them: node01 is cordoned, and controlplane has the control-plane taint, which none of the pods tolerate. So all 6 stay Pending. Your flags work, with two notes:
+
+--ignore-daemonsets is required because of the cilium pods.
+--force was not needed here. It’s only for bare pods with no controller, which would be deleted permanently. --delete-emptydir-data is only needed if a pod uses an emptyDir volume.
+
+6) Cordon vs NoExecute: one point is backwards
+
+You wrote that cordon is “strict”. It’s actually the weaker of the two. Put this in /tmp/t5-diff.txt:
+
+cordon = NoSchedule only: new pods are blocked, running pods stay.
+NoExecute taint = also evicts running pods that don't tolerate it.
+drain = cordon + evicts the pods (respecting PodDisruptionBudgets) so controllers recreate them elsewhere; cordon alone never moves anything.
+
+Cleanup
+
+bash
+k uncordon node01
+k taint node node01 env-
+k delete ns taint5
+k describe node node01 controlplane | grep -i taints
+
+What this set drilled
+
+A pod must tolerate every NoSchedule and NoExecute taint on a node, and the key, value and effect must all match.
+A toleration only permits. To dedicate a node you need taint plus toleration, and label plus nodeSelector or affinity.
+operator: Exists with no key is the wildcard used by system DaemonSets.
+NoSchedule blocks new pods, NoExecute also evicts, and tolerationSeconds delays that eviction.
+Cordon is a built-in NoSchedule taint, and drain is cordon plus eviction.
+
+That finishes scheduling: nodeSelector, node affinity, taints and tolerations. A natural next set is pod affinity and anti-affinity with topologyKey, or resource requests, limits and LimitRange, which also cause Pending pods. Which one do you want?
